@@ -56,6 +56,12 @@ load_dotenv(env_path)
 BASE_URL = os.environ.get("APPFLOWY_BASE_URL", "https://beta.appflowy.cloud").rstrip(
     "/"
 )
+# Base URL that AppFlowy's apps use (file links in image blocks must use it);
+# BASE_URL may be an in-cluster address.
+PUBLIC_URL = os.environ.get("APPFLOWY_PUBLIC_URL", BASE_URL).rstrip("/")
+UPLOAD_MAX_BYTES = int(
+    os.environ.get("APPFLOWY_UPLOAD_MAX_BYTES", str(20 * 1024 * 1024))
+)
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # Sent to MCP clients as server instructions — teaches the agent AppFlowy's model,
@@ -88,7 +94,8 @@ CONTENT IS MARKDOWN EVERYWHERE. create_page(markdown=...), append_blocks(markdow
 and a row/card `document` all take standard Markdown, rendered into real blocks:
 #/##/### headings, "- "/"1. " lists (nestable), "- [ ]" checkboxes, "> " quote,
 ```lang fenced code, "---" divider, images, links, GFM callouts (> [!NOTE]/[!TIP]/
-[!WARNING]…), $$ math blocks, and inline **bold**/*italic*/~~strike~~/`code`. Prefer
+[!WARNING]…), $$ math blocks, GFM tables (| a | b |, first row = header) rendered
+as real tables, and inline **bold**/*italic*/~~strike~~/`code`. Prefer
 markdown for any prose or card body. READ any page or card
 body back AS Markdown with get_page_markdown(page_id) — the inverse (page view id or row id).
 MENTION a page inline with [](mention:<view_id>) — renders as a live link to that page.
@@ -99,7 +106,12 @@ For blocks Markdown can't express, pass a page_data JSON block tree instead, e.g
   {"type":"todo_list","data":{"delta":[{"insert":"task"}],"checked":false}},
   {"type":"divider"}]}
 Block types: paragraph, heading(data.level 1-6), bulleted_list, numbered_list,
-todo_list(data.checked), quote, code(data.language), divider, image(data.url).
+todo_list(data.checked), quote, code(data.language), divider, image(data.url),
+simple_table > simple_table_row > simple_table_cell > paragraph.
+
+IMAGES AND FILES: upload_file(workspace_id, view_id, filename, content_base64,
+append_image=true) stores a file in AppFlowy (it shows in every app, no outside
+host needed) and returns its URL; use that URL in ![](url) to place it elsewhere.
 Delta attrs: bold, italic, underline, strikethrough, code, color, href.
 
 FIELD TYPES (add_database_field): 0=RichText 1=Number 2=DateTime 3=SingleSelect
@@ -127,7 +139,8 @@ the edit tools send merging updates; never PUT a whole collab.
 LIMITS: in-place edits render inline Markdown (bold/italic/code/strike/links) but not
 text color or underline. NOT SUPPORTED YET (roadmap — see KNOWLEDGE.md §9 Coverage):
 columns, toggle headings, table of contents, @mentions, link-to-page, web-bookmark,
-Drive/iframe embed, file/video/audio upload, List/Gallery/Chart/Feed views, and inline
+Drive/iframe embed, file/video/audio blocks (upload_file stores them, but only images
+get a block), List/Gallery/Chart/Feed views, and inline
 or linked database views. AI blocks (AI note/summarize/ask) run AppFlowy's own AI and
 aren't insertable content. Full guide + coverage matrix: MCP resource appflowy://guide
 (also KNOWLEDGE.md in the repo).
@@ -632,7 +645,13 @@ def _is_database_row(workspace_id: str, view_id: str) -> bool:
     if not isinstance(meta, dict):
         return False
     node = meta.get("data") if isinstance(meta.get("data"), dict) else meta
-    return isinstance(node, dict) and "row_data" in node
+    # A plain document ALSO carries "row_data" (as {}), next to its encoded_collab,
+    # so the bare key test called every page a row and append_blocks wrote its
+    # blocks twice. A row has real row_data, or no document collab at all.
+    return isinstance(node, dict) and (
+        bool(node.get("row_data"))
+        or ("row_data" in node and not node.get("encoded_collab"))
+    )
 
 
 # AppFlowy CollabType enum: Document=0, Database=1, DatabaseRow=4, UserAwareness=5.
@@ -914,8 +933,8 @@ def list_databases(workspace_id: str) -> list:
 # parser) and emit the block tree create_page / append_blocks feed to AppFlowy —
 # one Markdown content interface everywhere. Covers the basic-block palette;
 # unknown constructs fall back to a paragraph so text is never silently dropped.
-# ponytail: MVP palette — callouts/toggles/columns and tables-as-blocks are
-# roadmap (a GFM table degrades to its plaintext for now).
+# ponytail: MVP palette — callouts/toggles/columns are roadmap. GFM tables become
+# AppFlowy simple_table blocks.
 
 # dollarmath is configured with allow_digits/allow_space OFF, which is a data-loss
 # fix, not a preference. With the defaults, any prose containing two dollar AMOUNTS
@@ -1089,6 +1108,46 @@ def _list_item_block(li, list_type):
     return block
 
 
+def _table_block(node) -> dict:
+    """A GFM table -> AppFlowy simple_table (rows -> cells -> one paragraph each),
+    the same shape AppFlowy's own Markdown paste produces. Short rows are padded
+    so every row has the header's column count."""
+    rows = [
+        tr
+        for part in node.children
+        if part.type in ("thead", "tbody")
+        for tr in part.children
+        if tr.type == "tr"
+    ]
+    ncols = max((len(tr.children) for tr in rows), default=0)
+    out_rows = []
+    for tr in rows:
+        cells = []
+        for i in range(ncols):
+            delta = _delta_of(tr.children[i]) if i < len(tr.children) else []
+            cells.append(
+                {
+                    "type": "simple_table_cell",
+                    "data": {},
+                    "children": [
+                        {
+                            "type": "paragraph",
+                            "data": {"delta": delta or [{"insert": ""}]},
+                        }
+                    ],
+                }
+            )
+        out_rows.append({"type": "simple_table_row", "data": {}, "children": cells})
+    return {
+        "type": "simple_table",
+        "data": {
+            "enable_header_row": True,
+            "column_widths": {str(i): 200 for i in range(ncols)},
+        },
+        "children": out_rows,
+    }
+
+
 def _block_from_node(node) -> list:
     """Map one markdown-it block node -> zero or more AppFlowy blocks."""
     t = node.type
@@ -1098,7 +1157,7 @@ def _block_from_node(node) -> list:
     if t == "paragraph":
         url = _sole_image_url(node)
         if url:
-            return [{"type": "image", "data": {"url": url}}]
+            return [{"type": "image", "data": {"url": url, "image_type": 2}}]
         return [{"type": "paragraph", "data": {"delta": _delta_of(node)}}]
     if t == "hr":
         return [{"type": "divider", "data": {}}]
@@ -1130,6 +1189,8 @@ def _block_from_node(node) -> list:
                     }
                 ]
         return [{"type": "quote", "data": {"delta": delta or [{"insert": ""}]}}]
+    if t == "table":
+        return [_table_block(node)]
     if t == "bullet_list":
         return [_list_item_block(li, "bulleted_list") for li in node.children]
     if t == "ordered_list":
@@ -1185,6 +1246,33 @@ def _inline_md(delta) -> str:
     return "".join(out)
 
 
+def _child_ids(b, cmap):
+    ck = b.get("children", None)
+    return list(cmap[ck]) if ck is not None and ck in cmap else []
+
+
+def _render_table(b, blocks, cmap, tmap) -> list:
+    """simple_table -> GFM table lines; each cell's paragraphs joined with <br>."""
+    rows = []
+    for rid in _child_ids(b, cmap):
+        row = []
+        for cid in _child_ids(blocks[rid], cmap):
+            parts = []
+            for pid in _child_ids(blocks[cid], cmap):
+                ext = blocks[pid].get("external_id", None)
+                d = tmap[ext].diff() if (ext is not None and ext in tmap) else []
+                parts.append(_inline_md(d))
+            row.append("<br>".join(parts).replace("|", "\\|").replace("\n", "<br>"))
+        rows.append(row)
+    if not rows:
+        return []
+    n = max(len(r) for r in rows)
+    rows = [r + [""] * (n - len(r)) for r in rows]
+    lines = ["| " + " | ".join(rows[0]) + " |", "|" + " --- |" * n]
+    lines += ["| " + " | ".join(r) + " |" for r in rows[1:]]
+    return lines
+
+
 def _render_block(bid, blocks, cmap, tmap, depth):
     """Return (lines, is_list_item) for a block and its (indented) children."""
     b = blocks[bid]
@@ -1194,6 +1282,8 @@ def _render_block(bid, blocks, cmap, tmap, depth):
     delta = tmap[ext].diff() if (ext is not None and ext in tmap) else []
     pad = "  " * depth
 
+    if ty == "simple_table":
+        return _render_table(b, blocks, cmap, tmap), None
     if ty == "code":
         raw = "".join(t for t, _ in delta)
         lines = [f"```{data.get('language', '')}", *raw.split("\n"), "```"]
@@ -1431,7 +1521,7 @@ def create_page(
 
     Preferred — `markdown`: standard Markdown is rendered into real AppFlowy
     blocks (headings; bulleted / numbered / `- [ ]` task lists incl. nesting;
-    quotes; fenced code with language; dividers; images; and inline **bold**,
+    quotes; fenced code with language; dividers; images; GFM tables; and inline **bold**,
     *italic*, ~~strike~~, `code`, and [links](url)).
     e.g. markdown="# Plan\\n\\n- [ ] draft\\n- [x] outline".
 
@@ -1702,6 +1792,11 @@ def append_blocks(
         payload = json.loads(blocks)
     else:
         raise ValueError("provide `markdown` (preferred) or `blocks`")
+    # AppFlowy's REST append-block scrambles nested blocks (a table's rows and cells
+    # came back reversed, and the blocks around it out of order), so anything with
+    # children goes through the collab layer, which keeps the order.
+    if any(b.get("children") for b in payload if isinstance(b, dict)):
+        return add_blocks(workspace_id, view_id, blocks=json.dumps(payload))
     result = _post(
         f"/api/workspace/{workspace_id}/page-view/{view_id}/append-block",
         {"blocks": payload},
@@ -1717,6 +1812,72 @@ def append_blocks(
     if _is_database_row(workspace_id, view_id):
         return add_blocks(workspace_id, view_id, markdown=markdown, blocks=blocks)
     return result
+
+
+@mcp.tool(annotations=_CREATE)
+def upload_file(
+    workspace_id: str,
+    view_id: str,
+    filename: str,
+    content_base64: str,
+    content_type: str = "",
+    append_image: bool = False,
+) -> str:
+    """Uploads a file (an image, a PDF, ...) into AppFlowy's own file storage, attached
+    to the page `view_id`, and returns its URL. The URL works in AppFlowy's web,
+    desktop and phone apps (they sign in to fetch it), so pictures need no outside host.
+
+    `content_base64`: the file's bytes, base64-encoded (max 20 MB decoded).
+    `content_type`: e.g. image/jpeg; guessed from `filename` when empty.
+    `append_image=true`: also appends an image block showing it at the END of the
+    page. Otherwise place it yourself with ![](url) in create_page / append_blocks /
+    add_blocks markdown (any page of this workspace)."""
+    import mimetypes
+
+    _require_workspace(workspace_id)
+    try:
+        raw = base64.b64decode(content_base64, validate=True)
+    except ValueError as e:
+        raise ValueError("content_base64 is not valid base64") from e
+    if not raw:
+        raise ValueError("content_base64 is empty")
+    if len(raw) > UPLOAD_MAX_BYTES:
+        raise ValueError(
+            f"file is {len(raw)} bytes; the limit is {UPLOAD_MAX_BYTES} — shrink it first"
+        )
+    ctype = (
+        content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    )
+    path = f"/api/file_storage/{workspace_id}/v1/blob/{view_id}"
+    headers = {**get_auth_headers(), "Content-Type": ctype}
+    try:
+        with httpx.Client(timeout=120.0) as client:
+            res = client.put(f"{BASE_URL}{path}", content=raw, headers=headers)
+            res.raise_for_status()
+            payload = res.json()
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code
+        hint = _ERROR_HINTS.get(code, "unexpected AppFlowy API error")
+        body = " ".join(e.response.text[:200].split())
+        raise RuntimeError(f"AppFlowy API {code}: {hint}. Server said: {body}") from e
+    except httpx.RequestError as e:
+        raise RuntimeError(
+            f"AppFlowy upload did not complete ({type(e).__name__}) — retry shortly"
+        ) from e
+    _raise_appflowy_application_error(payload, path)
+    file_id = (payload.get("data") or {}).get("file_id")
+    if not file_id:
+        raise RuntimeError(f"AppFlowy upload returned no file_id: {str(payload)[:200]}")
+    url = f"{PUBLIC_URL}{path}/{file_id}"
+    if append_image:
+        append_blocks(
+            workspace_id,
+            view_id,
+            blocks=json.dumps(
+                [{"type": "image", "data": {"url": url, "image_type": 2}}]
+            ),
+        )
+    return url
 
 
 @mcp.tool(annotations=_CREATE)

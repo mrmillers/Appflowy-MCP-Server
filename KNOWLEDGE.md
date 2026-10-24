@@ -43,6 +43,7 @@ A row holds content in two distinct places:
 | **Group a Board by a field** | `set_group_by` |
 | Add / upsert a row (card) | `create_database_row`, `upsert_database_row` |
 | Append to a doc (end only) | `append_blocks` |
+| Upload a file or image | `upload_file` (base64; returns the file URL) |
 | Reorganize | `create_space`, `move_page`, `duplicate_page`, `trash_page`, `restore_page` |
 | **Rename a page / database / space** | `rename_page` |
 | **Change a row's cells / move a card** | `update_row_cells` |
@@ -191,14 +192,15 @@ supported path first, and check the roadmap before assuming a gap is permanent.
 | Callout | ✅ | `add_block callout` (`data.icon`) — not from Markdown |
 | Toggle list | ✅ | `add_block toggle_list` — not from Markdown |
 | Divider | ✅ | `---`, or `add_block divider` |
-| Simple table | 🟡 | GFM table in a Markdown body; no table-edit tool |
+| Simple table | ✅ | GFM table in a Markdown body (first row = header) → `simple_table`; read back as GFM. No table-edit tool |
 | Link to page / Breadcrumb | 🗺️ | needs a `sub_page`/mention block |
 
 **Media**
 | AppFlowy option | MCP | How |
 |---|---|---|
 | Image (external URL) | ✅ | `![](url)` or `add_block image` (`data.url`) |
-| File / PDF / Video / Audio / Photo gallery | 🗺️ | need file upload |
+| Image (uploaded) | ✅ | `upload_file(..., append_image=true)`, or put its returned URL in `![](url)` |
+| File / PDF / Video / Audio / Photo gallery | 🟡 | `upload_file` stores the file and returns its URL; no file/video/audio block yet |
 | Web bookmark / Google Drive embed | 🗺️ | `link_preview` / embed block |
 
 **Database**

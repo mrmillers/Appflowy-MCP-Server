@@ -1860,8 +1860,8 @@ def test_md_to_blocks_covers_core_palette():
 def test_md_to_blocks_empty_and_fallback():
     assert server._md_to_blocks("") == []
     assert server._md_to_blocks("   \n") == []
-    # an unsupported construct (GFM table) degrades to plaintext, never dropped
-    blocks = server._md_to_blocks("| a | b |\n|---|---|\n| 1 | 2 |")
+    # an unsupported construct (an HTML block) degrades to plaintext, never dropped
+    blocks = server._md_to_blocks("<div>\nhello\n</div>")
     assert blocks and all(b["type"] == "paragraph" for b in blocks)
     assert (
         "".join(o["insert"] for b in blocks for o in b["data"]["delta"]).strip() != ""
@@ -2064,3 +2064,149 @@ def test_page_mention_roundtrip():
         [("$", {"mention": {"type": "page", "page_id": "pg123"}})]
     )
     assert rendered == "[](mention:pg123)"
+
+
+def test_is_database_row_document_with_empty_row_data(monkeypatch):
+    # A real document's page-view payload carries `row_data` too (as {}), next to its
+    # encoded_collab. Taking that for a row made append_blocks write everything twice.
+    import httpx
+
+    def as_doc(_request):
+        return httpx.Response(
+            200, json={"data": {"data": {"encoded_collab": [1, 2], "row_data": {}}}}
+        )
+
+    _mock_http(monkeypatch, as_doc)
+    assert server._is_database_row("ws", "some-id") is False
+
+    def as_row(_request):
+        return httpx.Response(
+            200, json={"data": {"data": {"row_data": {"id": "r1", "cells": {}}}}}
+        )
+
+    _mock_http(monkeypatch, as_row)
+    assert server._is_database_row("ws", "some-id") is True
+
+
+def test_md_to_blocks_table_becomes_simple_table():
+    md = "| A | B |\n| --- | --- |\n| **one** | 1 |\n| short |\n"
+    (table,) = server._md_to_blocks(md)
+    assert table["type"] == "simple_table"
+    assert table["data"]["enable_header_row"] is True
+    assert set(table["data"]["column_widths"]) == {"0", "1"}
+    rows = table["children"]
+    assert [r["type"] for r in rows] == ["simple_table_row"] * 3
+    # every row has the header's column count; a short row is padded
+    assert [len(r["children"]) for r in rows] == [2, 2, 2]
+    cell = rows[1]["children"][0]
+    assert cell["type"] == "simple_table_cell"
+    (para,) = cell["children"]
+    assert para["data"]["delta"] == [{"insert": "one", "attributes": {"bold": True}}]
+    assert rows[2]["children"][1]["children"][0]["data"]["delta"] == [{"insert": ""}]
+
+
+def test_table_round_trips_through_collab():
+    # md -> blocks -> collab (the add_blocks path) -> md keeps rows, cells and order.
+    from pycrdt import Array, Doc, Map
+
+    md = "Intro\n\n| A | B |\n| --- | --- |\n| 1 | x \\| y |\n| 2 | `z` |\n\nAfter\n"
+    doc = Doc()
+    root = doc.get("data", type=Map)
+    with doc.transaction():
+        root["document"] = Map(
+            {
+                "blocks": Map(),
+                "meta": Map({"children_map": Map(), "text_map": Map()}),
+                "page_id": "page",
+            }
+        )
+        document = root["document"]
+        bmap, meta = document["blocks"], document["meta"]
+        cmap, tmap = meta["children_map"], meta["text_map"]
+        cmap["pc"] = Array([])
+        bmap["page"] = Map({"ty": "page", "data": "{}", "children": "pc"})
+        for spec in server._md_to_blocks(md):
+            cmap["pc"].append(server._insert_pd_block(bmap, cmap, tmap, spec, "page"))
+    out = server._doc_to_markdown(root["document"]).rstrip("\n")
+    assert out == (
+        "Intro\n\n| A | B |\n| --- | --- |\n| 1 | x \\| y |\n| 2 | `z` |\n\nAfter"
+    )
+
+
+def test_md_to_blocks_image_is_external_type():
+    (img,) = server._md_to_blocks("![](https://x/y.png)")
+    assert img == {
+        "type": "image",
+        "data": {"url": "https://x/y.png", "image_type": 2},
+    }
+
+
+def test_append_blocks_nested_goes_through_collab(monkeypatch):
+    # AppFlowy's REST append-block reverses nested blocks (a table's rows and cells)
+    # and reorders the blocks around them, so nested content takes the collab path.
+    calls = {}
+
+    def fake_add_blocks(ws, pid, markdown="", blocks=""):
+        calls["blocks"] = blocks
+        return "b1,b2"
+
+    def no_post(*_a, **_k):
+        raise AssertionError("REST append must not be used for nested blocks")
+
+    monkeypatch.setattr(server, "_require_workspace", lambda *_: None)
+    monkeypatch.setattr(server, "_post", no_post)
+    monkeypatch.setattr(server, "add_blocks", fake_add_blocks)
+
+    md = "Before\n\n| A |\n| --- |\n| 1 |\n"
+    assert server.append_blocks("ws", "page-id", markdown=md) == "b1,b2"
+    import json
+
+    assert [b["type"] for b in json.loads(calls["blocks"])] == [
+        "paragraph",
+        "simple_table",
+    ]
+
+
+def test_upload_file_puts_bytes_and_returns_public_url(monkeypatch):
+    import base64
+
+    import httpx
+
+    seen = {}
+
+    def handler(request):
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["ctype"] = request.headers.get("content-type")
+        seen["body"] = request.content
+        return httpx.Response(200, json={"code": 0, "data": {"file_id": "abc.png"}})
+
+    _mock_http(monkeypatch, handler)
+    monkeypatch.setattr(server, "_require_workspace", lambda *_: None)
+    monkeypatch.setattr(server, "PUBLIC_URL", "https://appflowy.example")
+    appended = {}
+    monkeypatch.setattr(
+        server, "append_blocks", lambda ws, vid, **k: appended.update(k) or "blk"
+    )
+
+    data = b"\x89PNG fake"
+    url = server.upload_file(
+        "ws", "view-1", "pic.png", base64.b64encode(data).decode(), append_image=True
+    )
+    assert seen["method"] == "PUT"
+    assert seen["path"] == "/api/file_storage/ws/v1/blob/view-1"
+    assert seen["ctype"] == "image/png"
+    assert seen["body"] == data
+    assert url == "https://appflowy.example/api/file_storage/ws/v1/blob/view-1/abc.png"
+    assert '"url": "' + url in appended["blocks"]
+
+
+def test_upload_file_rejects_bad_input(monkeypatch):
+    monkeypatch.setattr(server, "_require_workspace", lambda *_: None)
+    with pytest.raises(ValueError, match="not valid base64"):
+        server.upload_file("ws", "v", "a.png", "%%%")
+    with pytest.raises(ValueError, match="empty"):
+        server.upload_file("ws", "v", "a.png", "")
+    monkeypatch.setattr(server, "UPLOAD_MAX_BYTES", 3)
+    with pytest.raises(ValueError, match="limit"):
+        server.upload_file("ws", "v", "a.png", "AAAAAAAA")

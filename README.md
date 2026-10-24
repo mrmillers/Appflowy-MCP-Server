@@ -49,8 +49,8 @@ Here's what this MCP creates **today** — the rest is on the roadmap below.
 
 | Category | Supported now | Partial / roadmap |
 |---|---|---|
-| **Text blocks** | Text, Heading 1–3, bulleted / numbered / to-do lists, quote, code, callout, toggle, divider | 🟡 simple table (GFM in Markdown) · 🗺️ link-to-page, breadcrumb |
-| **Media** | Image by URL | 🗺️ file / PDF / video / audio upload, photo gallery, web bookmark, Drive embed |
+| **Text blocks** | Text, Heading 1–3, bulleted / numbered / to-do lists, quote, code, callout, toggle, divider | ✅ simple table (GFM in Markdown, read back as GFM) · 🗺️ link-to-page, breadcrumb |
+| **Media** | Image by URL; upload any file to AppFlowy's storage (`upload_file`, images get an image block) | 🗺️ file / PDF / video / audio blocks, photo gallery, web bookmark, Drive embed |
 | **Database** | Full-page Grid / Board / Calendar, extra views, Board grouping, select options | 🗺️ List / Gallery / Chart / Feed views, inline & linked views |
 | **Advanced** | Callouts (`> [!NOTE]`), block & inline equations (`$$` / `$…$`), toggle-headings (via `add_block`) | 🗺️ columns, table of contents, Mermaid |
 | **Inline style** | Bold / italic / strike / code / link, **page @mention** (`[](mention:id)`), color (page bodies), emoji | 🗺️ underline, background color, person-mention (not in AppFlowy), date & reminder |
@@ -235,7 +235,7 @@ because 34 shims alongside 12 verbs would defeat the point.
 - **Person mentions** — AppFlowy's editor has no person-mention type yet (page mentions ship via `[](mention:id)`); revisit when self-hosting adds agents as workspace members.
 - **More blocks** — columns, toggle headings, table of contents, block equation, Mermaid, link-to-page.
 - **Import files** — PDF / Word / PowerPoint / Excel / audio → Markdown → AppFlowy blocks (via [markitdown](https://github.com/microsoft/markitdown)), reusing the Markdown converter.
-- **Media** — file / PDF / image / video / audio upload, web bookmark, embeds.
+- **Media** — file / PDF / video / audio blocks, web bookmark, embeds.
 
 **Databases**
 - **More views & layouts** — List, Gallery, Chart, Feed; inline and linked database views.

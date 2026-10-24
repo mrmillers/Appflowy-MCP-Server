@@ -7,6 +7,15 @@ All notable changes are documented here. The format loosely follows
 ## [Unreleased]
 
 ### Fixed
+- **`append_blocks` wrote blocks twice** (#16). `_is_database_row` tested only for
+  the `row_data` key, but a document's page-view payload carries `row_data: {}`
+  too, so every page counted as a row and a REST append with an empty result was
+  repeated through the collab layer. A row now needs non-empty `row_data`, or
+  `row_data` without a document collab.
+- **`append_blocks` scrambled nested blocks** (#17). AppFlowy's REST append-block
+  reversed a table's rows and cells and reordered the blocks around them, so
+  blocks with children now go through the collab layer (`add_blocks`), which
+  keeps the order.
 - **Pinned `mcp>=1.13,<2`.** `mcp` 2.0.0 removed `mcp.server.fastmcp`, which this
   server is built on, so an unpinned install resolved 2.0.0 and died at import with
   `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` — breaking every fresh
@@ -52,6 +61,17 @@ All notable changes are documented here. The format loosely follows
   no longer mis-typed.
 
 ### Added
+- **GFM tables become real AppFlowy tables.** A Markdown table in `create_page` /
+  `append_blocks` / `add_blocks` / row bodies is now a `simple_table`
+  (rows → cells → paragraph, first row as header, the shape AppFlowy's own
+  Markdown paste builds) instead of one run-on paragraph of cell text, and
+  `get_page_markdown` reads it back as a GFM table.
+- **`upload_file`.** Stores a file (base64) in AppFlowy's own file storage,
+  attached to a page, and returns its URL; `append_image=true` also appends an
+  image block. The URL uses `APPFLOWY_PUBLIC_URL` (defaults to
+  `APPFLOWY_BASE_URL`) so it works in the apps when the server talks to AppFlowy
+  over an internal address. Image blocks now carry `image_type: 2`, as AppFlowy's
+  editor writes them.
 - **Page mentions in Markdown.** `[label](mention:<view_id>)` inserts a live inline
   mention (link) to another page and round-trips through `get_page_markdown`. AppFlowy's
   editor has no person-mention type, so this covers page mentions.
